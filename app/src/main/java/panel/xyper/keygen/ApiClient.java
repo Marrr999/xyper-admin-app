@@ -5,9 +5,11 @@ import android.content.Context;
 import okhttp3.CertificatePinner;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.Response;
 import okhttp3.logging.HttpLoggingInterceptor;
 import retrofit2.Retrofit;
 import retrofit2.converter.scalars.ScalarsConverterFactory;
+import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -19,10 +21,16 @@ import java.util.concurrent.TimeUnit;
  *       - Pin 2 (Intermediate CA) : kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=
  *   3. [SECURITY] Request timeout ketat (10s connect, 15s read/write)
  *   4. [BUG FIX]  Thread-safe singleton dengan double-checked locking
+ *   5. [NEW]      Handle HTTP 429 — auto retry dengan retry_after dari server
+ *   6. [NEW]      HMAC signature header — dikirim kalau HMAC_SECRET di-set di local.properties
  */
 public class ApiClient {
 
     private static final boolean DEBUG = false;
+
+    // ── Retry config ─────────────────────────────────────────
+    private static final int MAX_RETRY_COUNT    = 3;       // max berapa kali retry
+    private static final long DEFAULT_RETRY_MS  = 5_000L;  // default wait kalau tidak ada retry_after
 
     // ── URL dari AppConstants (terenkripsi) ──────────────────
     private static String getBaseUrl() {
@@ -39,16 +47,6 @@ public class ApiClient {
     }
 
     // ── Certificate Pinner ───────────────────────────────────
-    //
-    // Pin diperoleh dengan:
-    //   openssl s_client -showcerts -connect xyper-api.djangkapjaya.workers.dev:443
-    //   | ... | openssl dgst -sha256 -binary | base64
-    //
-    // Pin 1 — Leaf certificate (Cloudflare edge cert, rotate ~90 hari)
-    // Pin 2 — Intermediate CA  (Cloudflare Inc ECC CA-3, lebih stabil)
-    //
-    // PENTING: Selalu ada 2 pin. Kalau leaf rotate dan hanya ada 1 pin → app mati.
-    // Kalau leaf rotate, update Pin 1. Pin 2 (intermediate) jarang berubah.
     private static CertificatePinner buildCertPinner() {
         return new CertificatePinner.Builder()
             .add(
@@ -76,6 +74,7 @@ public class ApiClient {
             .readTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
             .addInterceptor(logging)
+
             // ── Auth header interceptor ──────────────────────
             .addInterceptor(chain -> {
                 Request original = chain.request();
@@ -84,6 +83,61 @@ public class ApiClient {
                     ApiAuthHelper.applyHeaders(appContext, reqBuilder);
                 }
                 return chain.proceed(reqBuilder.build());
+            })
+
+            // ── HMAC Signature interceptor (opsional) ────────
+            // Aktif kalau HmacHelper.isEnabled() = true
+            // (bergantung apakah HMAC_SECRET ada di BuildConfig/local.properties)
+            .addInterceptor(chain -> {
+                Request original = chain.request();
+                if (!HmacHelper.isEnabled()) {
+                    return chain.proceed(original);
+                }
+                Request signed = HmacHelper.signRequest(original);
+                return chain.proceed(signed);
+            })
+
+            // ── HTTP 429 Retry interceptor ───────────────────
+            .addInterceptor(chain -> {
+                Request request = chain.request();
+                Response response = null;
+                int retryCount = 0;
+
+                while (retryCount < MAX_RETRY_COUNT) {
+                    // Tutup response sebelumnya kalau ada
+                    if (response != null) response.close();
+
+                    response = chain.proceed(request);
+
+                    // Bukan 429 → lanjutkan normal
+                    if (response.code() != 429) break;
+
+                    retryCount++;
+                    if (retryCount >= MAX_RETRY_COUNT) break;
+
+                    // Ambil retry_after dari response body
+                    long waitMs = DEFAULT_RETRY_MS;
+                    try {
+                        String bodyStr = response.peekBody(512).string();
+                        org.json.JSONObject json = new org.json.JSONObject(bodyStr);
+                        int retryAfterSec = json.optInt("retry_after", 0);
+                        if (retryAfterSec > 0) {
+                            waitMs = retryAfterSec * 1000L;
+                        }
+                    } catch (Exception ignored) {}
+
+                    // Tutup response sebelum sleep
+                    response.close();
+
+                    try {
+                        Thread.sleep(waitMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+
+                return response;
             });
 
         // Certificate Pinning — aktif di release

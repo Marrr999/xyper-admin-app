@@ -208,6 +208,16 @@ public class AccountPanel {
         content.addView(infoCard);
         animateCardIn(infoCard, ctx, 160);
 
+        // ── TRUSTED DEVICES (hanya Developer & Reseller) ──
+        if (!role.equalsIgnoreCase("Client")) {
+            content.addView(buildSectionTitle(ctx, "🔒  TRUSTED DEVICES"));
+            final LinearLayout trustedCard = buildCard(ctx, 0x0FFFFFFF, "#1E3A50");
+            trustedCard.setPadding(dp(ctx, 14), dp(ctx, 12), dp(ctx, 14), dp(ctx, 12));
+            content.addView(trustedCard);
+            animateCardIn(trustedCard, ctx, 200);
+            loadMyTrustedDevices(ctx, trustedCard);
+        }
+
         // ── RECENT ACTIVITY ──
         content.addView(buildSectionTitle(ctx, "🕒  RECENT ACTIVITY"));
 
@@ -602,6 +612,175 @@ public class AccountPanel {
         card.animate().alpha(1f).scaleX(1f).scaleY(1f)
             .setDuration(260).setInterpolator(new DecelerateInterpolator()).start();
         dialog.show();
+    }
+
+    // ===================== MY TRUSTED DEVICES =====================
+
+    private static void loadMyTrustedDevices(final Context ctx, final LinearLayout card) {
+        // Loading state
+        ProgressBar pb = new ProgressBar(ctx);
+        LinearLayout loadRow = new LinearLayout(ctx);
+        loadRow.setGravity(Gravity.CENTER);
+        loadRow.setPadding(0, dp(ctx, 8), 0, dp(ctx, 8));
+        TextView loadTv = new TextView(ctx);
+        loadTv.setText("  Memuat trusted devices...");
+        loadTv.setTextColor(Color.parseColor("#475569"));
+        loadTv.setTextSize(12f);
+        loadTv.setTypeface(Typeface.MONOSPACE);
+        loadRow.addView(pb);
+        loadRow.addView(loadTv);
+        card.addView(loadRow);
+
+        try {
+            // list_trusted_devices untuk key sendiri (target_encoded = key sendiri)
+            String myKey = ApiAuthHelper.getApiKey(ctx);
+            if (myKey == null || myKey.isEmpty()) {
+                card.removeAllViews();
+                addSimpleText(ctx, card, "API Key tidak ditemukan.");
+                return;
+            }
+            String myEncodedKey = android.util.Base64.encodeToString(
+                myKey.trim().getBytes("UTF-8"),
+                android.util.Base64.NO_WRAP
+            );
+
+            JSONObject payload = new JSONObject();
+            payload.put("action", "list_trusted_devices");
+            payload.put("target_encoded", myEncodedKey);
+
+            ApiClient.getAdminService().postAction(payload.toString())
+                .enqueue(new retrofit2.Callback<String>() {
+                    @Override public void onResponse(Call<String> call, Response<String> resp) {
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                card.removeAllViews();
+                                if (!resp.isSuccessful()) {
+                                    addSimpleText(ctx, card, "Gagal load — HTTP " + resp.code());
+                                    return;
+                                }
+                                try {
+                                    JSONObject result = new JSONObject(resp.body());
+                                    int total         = result.optInt("total", 0);
+                                    JSONArray devices = result.optJSONArray("devices");
+
+                                    // Info jumlah slot
+                                    String role  = ApiAuthHelper.getRole(ctx);
+                                    int maxSlots = role.equalsIgnoreCase("Developer") ? 5 : 2;
+                                    TextView tvSlot = new TextView(ctx);
+                                    tvSlot.setText(total + " / " + maxSlots + " device terdaftar");
+                                    tvSlot.setTextColor(Color.parseColor(CYAN));
+                                    tvSlot.setTextSize(12f);
+                                    tvSlot.setTypeface(Typeface.DEFAULT_BOLD);
+                                    LinearLayout.LayoutParams slotLp = new LinearLayout.LayoutParams(-1, -2);
+                                    slotLp.bottomMargin = dp(ctx, 10);
+                                    tvSlot.setLayoutParams(slotLp);
+                                    card.addView(tvSlot);
+
+                                    if (total == 0 || devices == null || devices.length() == 0) {
+                                        addSimpleText(ctx, card, "Belum ada trusted device.");
+                                        return;
+                                    }
+
+                                    String myDeviceId = ApiAuthHelper.getDeviceId(ctx);
+                                    for (int i = 0; i < devices.length(); i++) {
+                                        try {
+                                            JSONObject d  = devices.getJSONObject(i);
+                                            String devId  = d.optString("device_id", "");
+                                            String name   = d.optString("device_name", "");
+                                            if (name.isEmpty()) name = devId.length() > 14
+                                                ? devId.substring(0, 14) + "..." : devId;
+                                            String model  = d.optString("model", "");
+                                            long lastUsed = d.optLong("last_used", 0);
+                                            boolean isThis = devId.equals(myDeviceId);
+
+                                            LinearLayout row = new LinearLayout(ctx);
+                                            row.setOrientation(LinearLayout.HORIZONTAL);
+                                            row.setGravity(Gravity.CENTER_VERTICAL);
+                                            row.setPadding(dp(ctx, 8), dp(ctx, 8), dp(ctx, 8), dp(ctx, 8));
+                                            GradientDrawable rowBg = new GradientDrawable();
+                                            rowBg.setColor(isThis ? 0x1222E5FF : 0x08FFFFFF);
+                                            rowBg.setCornerRadius(dp(ctx, 10));
+                                            rowBg.setStroke(dp(ctx, 1), isThis ? 0x5522E5FF : 0x1AFFFFFF);
+                                            row.setBackground(rowBg);
+                                            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
+                                            rowLp.bottomMargin = dp(ctx, 6);
+                                            row.setLayoutParams(rowLp);
+
+                                            LinearLayout info = new LinearLayout(ctx);
+                                            info.setOrientation(LinearLayout.VERTICAL);
+                                            info.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
+
+                                            TextView tvName = new TextView(ctx);
+                                            tvName.setText((isThis ? "📱 " : "📱 ") + name
+                                                + (model.isEmpty() ? "" : " · " + model)
+                                                + (isThis ? "  ← Perangkat ini" : ""));
+                                            tvName.setTextColor(isThis
+                                                ? Color.parseColor(CYAN)
+                                                : Color.parseColor("#CBD5E1"));
+                                            tvName.setTextSize(12f);
+                                            tvName.setMaxLines(1);
+                                            tvName.setEllipsize(TextUtils.TruncateAt.END);
+                                            info.addView(tvName);
+
+                                            if (lastUsed > 0) {
+                                                TextView tvLast = new TextView(ctx);
+                                                tvLast.setText("Last: " + formatTimeShort(lastUsed));
+                                                tvLast.setTextColor(0xFF475569);
+                                                tvLast.setTextSize(10f);
+                                                tvLast.setTypeface(Typeface.MONOSPACE);
+                                                info.addView(tvLast);
+                                            }
+                                            row.addView(info);
+
+                                            // Badge "THIS" untuk device aktif
+                                            if (isThis) {
+                                                TextView badge = new TextView(ctx);
+                                                badge.setText("AKTIF");
+                                                badge.setTextColor(Color.parseColor(CYAN));
+                                                badge.setTextSize(9f);
+                                                badge.setTypeface(Typeface.DEFAULT_BOLD);
+                                                badge.setPadding(dp(ctx, 5), dp(ctx, 2), dp(ctx, 5), dp(ctx, 2));
+                                                GradientDrawable bBg = new GradientDrawable();
+                                                bBg.setColor(0x2222E5FF);
+                                                bBg.setCornerRadius(dp(ctx, 4));
+                                                bBg.setStroke(dp(ctx, 1), 0x6622E5FF);
+                                                badge.setBackground(bBg);
+                                                row.addView(badge);
+                                            }
+
+                                            card.addView(row);
+                                        } catch (Exception ignored) {}
+                                    }
+
+                                } catch (Exception e) {
+                                    addSimpleText(ctx, card, "Parse error: " + e.getMessage());
+                                }
+                            }
+                        });
+                    }
+                    @Override public void onFailure(Call<String> call, Throwable t) {
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                card.removeAllViews();
+                                addSimpleText(ctx, card, "Connection failed");
+                            }
+                        });
+                    }
+                });
+        } catch (Exception e) {
+            card.removeAllViews();
+            addSimpleText(ctx, card, "Error: " + e.getMessage());
+        }
+    }
+
+    private static void addSimpleText(Context ctx, LinearLayout card, String msg) {
+        TextView tv = new TextView(ctx);
+        tv.setText(msg);
+        tv.setTextColor(Color.parseColor("#475569"));
+        tv.setTextSize(12f);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setPadding(dp(ctx, 4), dp(ctx, 8), dp(ctx, 4), dp(ctx, 8));
+        card.addView(tv);
     }
 
     // ===================== UI HELPERS =====================

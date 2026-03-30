@@ -459,6 +459,21 @@ public class ManageReseller {
         actionRow.addView(btnDel);
         card.addView(actionRow);
 
+        // ── Reset Trusted Device (Developer only) ──
+        if (ApiAuthHelper.isDeveloper(ctx)) {
+            LinearLayout.LayoutParams resetTdLp = new LinearLayout.LayoutParams(-1, -2);
+            resetTdLp.bottomMargin = dp(ctx, 8);
+            TextView btnResetTd = makeBtn(ctx, "🔄  Reset Trusted Device", "#A78BFA", "#0D0520", "#4C1D95");
+            btnResetTd.setLayoutParams(resetTdLp);
+            btnResetTd.setGravity(Gravity.CENTER);
+            btnResetTd.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    showConfirmResetTrustedDevice(ctx, encoded, plainKey);
+                }
+            });
+            card.addView(btnResetTd);
+        }
+
         // Toggle client list
         if (!clients.isEmpty()) {
             final LinearLayout clientsContainer = new LinearLayout(ctx);
@@ -538,6 +553,55 @@ public class ManageReseller {
     }
 
     // ── Action ────────────────────────────────────────────────────
+    // ── Reset Trusted Device untuk Reseller tertentu ──────────────
+    private static void showConfirmResetTrustedDevice(final Context ctx,
+            final String encodedKey, final String plainKey) {
+        new android.app.AlertDialog.Builder(ctx)
+            .setTitle("Reset Trusted Device")
+            .setMessage("Reset semua trusted device untuk reseller \"" + plainKey + "\"?\n\nReseller harus register ulang device-nya setelah ini.")
+            .setPositiveButton("Reset", new android.content.DialogInterface.OnClickListener() {
+                @Override public void onClick(android.content.DialogInterface d, int w) {
+                    doResetTrustedDevice(ctx, encodedKey);
+                }
+            })
+            .setNegativeButton("Batal", null)
+            .show();
+    }
+
+    private static void doResetTrustedDevice(final Context ctx, final String encodedKey) {
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("action", "reset_trusted_device");
+            payload.put("target_encoded", encodedKey);
+
+            ApiClient.getAdminService().postAction(payload.toString())
+                .enqueue(new retrofit2.Callback<String>() {
+                    @Override public void onResponse(Call<String> call, Response<String> resp) {
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                String msg = resp.isSuccessful()
+                                    ? "✅ Trusted device reset berhasil"
+                                    : "❌ Gagal reset — HTTP " + resp.code();
+                                Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show();
+                                if (resp.isSuccessful()) {
+                                    ActivityLog.log(ctx, "reset_trusted_device", encodedKey);
+                                }
+                            }
+                        });
+                    }
+                    @Override public void onFailure(Call<String> call, Throwable t) {
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                Toast.makeText(ctx, "Connection failed", Toast.LENGTH_SHORT).show();
+                            }
+                        });
+                    }
+                });
+        } catch (Exception e) {
+            Toast.makeText(ctx, "Error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
+    }
+
     private static void doAction(final Context ctx, String action, String encoded, Runnable onDone) {
         try {
             JSONObject payload = new JSONObject();

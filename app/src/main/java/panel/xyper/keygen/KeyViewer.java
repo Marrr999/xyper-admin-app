@@ -20,6 +20,7 @@ import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.content.ClipData;
@@ -1309,6 +1310,11 @@ public class KeyViewer {
         row2.addView(btnReset);
         card.addView(row2);
 
+        // ── Trusted Devices section (hanya untuk Developer & Reseller) ──
+        if (!role.equals("Client")) {
+            card.addView(buildTrustedDeviceSection(ctx, encoded, role));
+        }
+
         // Devices
         if (devsFinal.length()>0) {
             TextView devLabel = new TextView(ctx);
@@ -1870,6 +1876,340 @@ public class KeyViewer {
     private static void unbanDevice(Context ctx, String id, String enc) {
         try { JSONObject ex=new JSONObject(); ex.put("target_encoded",enc); ex.put("target_id",id);
             sendAdminAction("unban_device",ex); } catch(Exception ignored){}
+    }
+
+    // ===================== TRUSTED DEVICE SECTION =====================
+
+    /**
+     * Buat section Trusted Devices untuk card Developer/Reseller.
+     * Data di-load lazy (baru fetch saat user tap "Show Trusted Devices").
+     */
+    private static View buildTrustedDeviceSection(final Context ctx,
+            final String encodedKey, final String role) {
+
+        final LinearLayout wrapper = new LinearLayout(ctx);
+        wrapper.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wLp = new LinearLayout.LayoutParams(-1, -2);
+        wLp.topMargin = dp(ctx, 8);
+        wrapper.setLayoutParams(wLp);
+
+        // ── Header row: label + tombol expand ──
+        LinearLayout headerRow = new LinearLayout(ctx);
+        headerRow.setOrientation(LinearLayout.HORIZONTAL);
+        headerRow.setGravity(Gravity.CENTER_VERTICAL);
+        headerRow.setPadding(dp(ctx, 10), dp(ctx, 8), dp(ctx, 10), dp(ctx, 8));
+        GradientDrawable hdrBg = new GradientDrawable();
+        hdrBg.setColor(0x0FA78BFA);
+        hdrBg.setCornerRadius(dp(ctx, 10));
+        hdrBg.setStroke(dp(ctx, 1), 0x44A78BFA);
+        headerRow.setBackground(hdrBg);
+
+        TextView tvLabel = new TextView(ctx);
+        tvLabel.setText("🔒  Trusted Devices");
+        tvLabel.setTextColor(Color.parseColor("#A78BFA"));
+        tvLabel.setTextSize(11f);
+        tvLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        tvLabel.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
+        headerRow.addView(tvLabel);
+
+        final TextView tvToggle = new TextView(ctx);
+        tvToggle.setText("Show ▾");
+        tvToggle.setTextColor(Color.parseColor("#A78BFA"));
+        tvToggle.setTextSize(11f);
+        tvToggle.setTypeface(Typeface.MONOSPACE);
+        headerRow.addView(tvToggle);
+        wrapper.addView(headerRow);
+
+        // ── Content area (awalnya hidden) ──
+        final LinearLayout contentArea = new LinearLayout(ctx);
+        contentArea.setOrientation(LinearLayout.VERTICAL);
+        contentArea.setPadding(dp(ctx, 4), dp(ctx, 4), dp(ctx, 4), 0);
+        contentArea.setVisibility(View.GONE);
+        wrapper.addView(contentArea);
+
+        final boolean[] expanded = {false};
+        final boolean[] loaded   = {false};
+
+        headerRow.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                expanded[0] = !expanded[0];
+                if (expanded[0]) {
+                    contentArea.setVisibility(View.VISIBLE);
+                    tvToggle.setText("Hide ▴");
+                    if (!loaded[0]) {
+                        loaded[0] = true;
+                        loadTrustedDevices(ctx, encodedKey, contentArea);
+                    }
+                } else {
+                    contentArea.setVisibility(View.GONE);
+                    tvToggle.setText("Show ▾");
+                }
+            }
+        });
+        attachPressScale(headerRow);
+        return wrapper;
+    }
+
+    /**
+     * Fetch list trusted devices dari Workers lalu render ke contentArea.
+     */
+    private static void loadTrustedDevices(final Context ctx,
+            final String encodedKey, final LinearLayout contentArea) {
+        contentArea.removeAllViews();
+
+        // Loading indicator
+        ProgressBar pb = new ProgressBar(ctx);
+        pb.setLayoutParams(new LinearLayout.LayoutParams(dp(ctx, 24), dp(ctx, 24)));
+        contentArea.addView(pb);
+
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("action", "list_trusted_devices");
+            payload.put("target_encoded", encodedKey);
+
+            ApiClient.getAdminService().postAction(payload.toString())
+                .enqueue(new retrofit2.Callback<String>() {
+                    @Override public void onResponse(Call<String> call, Response<String> resp) {
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                contentArea.removeAllViews();
+                                if (!resp.isSuccessful()) {
+                                    addTrustedDeviceError(ctx, contentArea, "Failed to load — HTTP " + resp.code());
+                                    return;
+                                }
+                                try {
+                                    JSONObject result  = new JSONObject(resp.body());
+                                    int total          = result.optInt("total", 0);
+                                    JSONArray devices  = result.optJSONArray("devices");
+
+                                    if (total == 0 || devices == null || devices.length() == 0) {
+                                        addTrustedDeviceEmpty(ctx, contentArea);
+                                    } else {
+                                        renderTrustedDeviceList(ctx, encodedKey, devices, contentArea);
+                                    }
+                                } catch (Exception e) {
+                                    addTrustedDeviceError(ctx, contentArea, "Parse error: " + e.getMessage());
+                                }
+                            }
+                        });
+                    }
+                    @Override public void onFailure(Call<String> call, Throwable t) {
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                contentArea.removeAllViews();
+                                addTrustedDeviceError(ctx, contentArea, "Connection failed");
+                            }
+                        });
+                    }
+                });
+        } catch (Exception e) {
+            contentArea.removeAllViews();
+            addTrustedDeviceError(ctx, contentArea, e.getMessage());
+        }
+    }
+
+    private static void renderTrustedDeviceList(final Context ctx,
+            final String encodedKey, final JSONArray devices,
+            final LinearLayout container) {
+
+        for (int i = 0; i < devices.length(); i++) {
+            try {
+                final JSONObject d      = devices.getJSONObject(i);
+                final String deviceId   = d.optString("device_id", "");
+                String deviceName       = d.optString("device_name", "");
+                if (deviceName.isEmpty()) deviceName = deviceId.length() > 12
+                    ? deviceId.substring(0, 12) + "..." : deviceId;
+                String model           = d.optString("model", "");
+                long lastUsed          = d.optLong("last_used", 0);
+
+                LinearLayout row = new LinearLayout(ctx);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6));
+                GradientDrawable rowBg = new GradientDrawable();
+                rowBg.setColor(0x08A78BFA);
+                rowBg.setCornerRadius(dp(ctx, 8));
+                rowBg.setStroke(dp(ctx, 1), 0x22A78BFA);
+                row.setBackground(rowBg);
+                LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
+                rowLp.bottomMargin = dp(ctx, 4);
+                row.setLayoutParams(rowLp);
+
+                // Device info
+                LinearLayout infoCol = new LinearLayout(ctx);
+                infoCol.setOrientation(LinearLayout.VERTICAL);
+                infoCol.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
+
+                TextView tvName = new TextView(ctx);
+                tvName.setText("📱 " + deviceName + (model.isEmpty() ? "" : " · " + model));
+                tvName.setTextColor(Color.parseColor("#CBD5E1"));
+                tvName.setTextSize(11f);
+                tvName.setMaxLines(1);
+                tvName.setEllipsize(TextUtils.TruncateAt.END);
+                infoCol.addView(tvName);
+
+                if (lastUsed > 0) {
+                    TextView tvLast = new TextView(ctx);
+                    tvLast.setText("Last: " + formatTime(lastUsed));
+                    tvLast.setTextColor(0xFF475569);
+                    tvLast.setTextSize(10f);
+                    tvLast.setTypeface(Typeface.MONOSPACE);
+                    infoCol.addView(tvLast);
+                }
+                row.addView(infoCol);
+
+                // Remove button
+                final String devNameFinal = deviceName;
+                TextView btnRemove = new TextView(ctx);
+                btnRemove.setText("✕ Remove");
+                btnRemove.setTextColor(Color.parseColor("#F87171"));
+                btnRemove.setTextSize(10f);
+                btnRemove.setTypeface(Typeface.DEFAULT_BOLD);
+                btnRemove.setGravity(Gravity.CENTER);
+                btnRemove.setPadding(dp(ctx, 8), dp(ctx, 4), dp(ctx, 8), dp(ctx, 4));
+                GradientDrawable removeBg = new GradientDrawable();
+                removeBg.setColor(0x15F87171);
+                removeBg.setCornerRadius(dp(ctx, 6));
+                removeBg.setStroke(dp(ctx, 1), 0x44F87171);
+                btnRemove.setBackground(removeBg);
+                attachPressScale(btnRemove);
+                btnRemove.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        showConfirmDialog(ctx,
+                            "Remove Trusted Device",
+                            "Remove \"" + devNameFinal + "\" dari trusted list? Device harus register ulang.",
+                            "#F87171",
+                            new Runnable() {
+                                @Override public void run() {
+                                    removeTrustedDevice(ctx, encodedKey, deviceId, container);
+                                }
+                            });
+                    }
+                });
+                row.addView(btnRemove);
+                container.addView(row);
+
+            } catch (Exception ignored) {}
+        }
+
+        // ── Reset All button ──
+        LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(-1, -2);
+        resetLp.topMargin = dp(ctx, 6);
+
+        TextView btnResetAll = new TextView(ctx);
+        btnResetAll.setText("🔄  Reset All Trusted Devices");
+        btnResetAll.setTextColor(Color.parseColor("#FBBF24"));
+        btnResetAll.setTextSize(11f);
+        btnResetAll.setTypeface(Typeface.DEFAULT_BOLD);
+        btnResetAll.setGravity(Gravity.CENTER);
+        btnResetAll.setPadding(dp(ctx, 10), dp(ctx, 8), dp(ctx, 10), dp(ctx, 8));
+        GradientDrawable resetAllBg = new GradientDrawable();
+        resetAllBg.setColor(0x15FBBF24);
+        resetAllBg.setCornerRadius(dp(ctx, 8));
+        resetAllBg.setStroke(dp(ctx, 1), 0x55FBBF24);
+        btnResetAll.setBackground(resetAllBg);
+        btnResetAll.setLayoutParams(resetLp);
+        attachPressScale(btnResetAll);
+        btnResetAll.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                showConfirmDialog(ctx,
+                    "Reset All Trusted Devices",
+                    "Semua trusted device akan dihapus. User harus register ulang dari device manapun.",
+                    "#FBBF24",
+                    new Runnable() {
+                        @Override public void run() {
+                            resetAllTrustedDevices(ctx, encodedKey, container);
+                        }
+                    });
+            }
+        });
+        container.addView(btnResetAll);
+    }
+
+    private static void addTrustedDeviceEmpty(Context ctx, LinearLayout container) {
+        TextView tv = new TextView(ctx);
+        tv.setText("Belum ada trusted device terdaftar.");
+        tv.setTextColor(0xFF475569);
+        tv.setTextSize(11f);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setPadding(dp(ctx, 4), dp(ctx, 4), dp(ctx, 4), dp(ctx, 4));
+        container.addView(tv);
+    }
+
+    private static void addTrustedDeviceError(Context ctx, LinearLayout container, String msg) {
+        TextView tv = new TextView(ctx);
+        tv.setText("⚠ " + msg);
+        tv.setTextColor(Color.parseColor("#F87171"));
+        tv.setTextSize(11f);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setPadding(dp(ctx, 4), dp(ctx, 4), dp(ctx, 4), dp(ctx, 4));
+        container.addView(tv);
+    }
+
+    private static void removeTrustedDevice(final Context ctx,
+            final String encodedKey, final String deviceId,
+            final LinearLayout contentArea) {
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("action", "remove_trusted_device");
+            payload.put("target_encoded", encodedKey);
+            payload.put("device_id", deviceId);
+
+            ApiClient.getAdminService().postAction(payload.toString())
+                .enqueue(new retrofit2.Callback<String>() {
+                    @Override public void onResponse(Call<String> call, Response<String> r) {
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                if (r.isSuccessful()) {
+                                    showNeonToast(ctx, "Device removed from trusted list");
+                                    ActivityLog.log(ctx, "remove_trusted_device", encodedKey);
+                                    // Reload list
+                                    loadTrustedDevices(ctx, encodedKey, contentArea);
+                                } else {
+                                    postError("Failed to remove device — HTTP " + r.code());
+                                }
+                            }
+                        });
+                    }
+                    @Override public void onFailure(Call<String> call, Throwable t) {
+                        postError("Connection failed: " + t.getMessage());
+                    }
+                });
+        } catch (Exception e) {
+            postError(e.getMessage());
+        }
+    }
+
+    private static void resetAllTrustedDevices(final Context ctx,
+            final String encodedKey, final LinearLayout contentArea) {
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("action", "reset_trusted_device");
+            payload.put("target_encoded", encodedKey);
+
+            ApiClient.getAdminService().postAction(payload.toString())
+                .enqueue(new retrofit2.Callback<String>() {
+                    @Override public void onResponse(Call<String> call, Response<String> r) {
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                if (r.isSuccessful()) {
+                                    showNeonToast(ctx, "All trusted devices reset");
+                                    ActivityLog.log(ctx, "reset_trusted_device", encodedKey);
+                                    contentArea.removeAllViews();
+                                    addTrustedDeviceEmpty(ctx, contentArea);
+                                } else {
+                                    postError("Failed to reset — HTTP " + r.code());
+                                }
+                            }
+                        });
+                    }
+                    @Override public void onFailure(Call<String> call, Throwable t) {
+                        postError("Connection failed: " + t.getMessage());
+                    }
+                });
+        } catch (Exception e) {
+            postError(e.getMessage());
+        }
     }
 
     private static void postRefresh() {
